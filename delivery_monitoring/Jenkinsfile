@@ -1,0 +1,100 @@
+pipeline {
+  agent any
+  environment {
+    LOCAL_SOURCE = "/mnt/c/Users/Disha Acharya/OneDrive/Desktop/New folder/delivery_monitoring"
+    NETWORK = "monitoring_net"
+    APP_IMAGE = "delivery_metrics:jenkins"
+  }
+  stages {
+    stage('Prepare') {
+      steps {
+        sh """
+          set -e
+          echo "Copying files from LOCAL_SOURCE=${LOCAL_SOURCE} to workspace..."
+          mkdir -p "\$WORKSPACE"
+          cp -r "${LOCAL_SOURCE}/." "\$WORKSPACE/" || true
+          ls -la "\$WORKSPACE"
+        """
+      }
+    }
+
+    stage('Pre-check Docker') {
+      steps {
+        sh '''
+          docker --version
+          docker info >/dev/null 2>&1 || { echo "Docker daemon not available"; exit 1; }
+        '''
+      }
+    }
+
+    stage('Build Image') {
+      steps {
+        sh '''
+          cd "$WORKSPACE"
+          # Build app image
+          docker build -t ${APP_IMAGE} .
+        '''
+      }
+    }
+
+    stage('Start Services') {
+      steps {
+        sh '''
+          # create network if missing
+          docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}
+
+          # cleanup previous runs
+          for c in prometheus grafana delivery_metrics; do docker rm -f $c >/dev/null 2>&1 || true; done
+
+          # run app container (publish 8000 so host curl works)
+          docker run -d --name delivery_metrics --network ${NETWORK} -p 8000:8000 ${APP_IMAGE}
+
+          # run prometheus using prom config from workspace
+          docker run -d --name prometheus --network ${NETWORK} -p 9090:9090 \
+            -v "$WORKSPACE/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$WORKSPACE/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro" \
+            prom/prometheus
+
+          # run grafana
+          docker run -d --name grafana --network ${NETWORK} -p 3000:3000 grafana/grafana
+        '''
+      }
+    }
+
+    stage('Healthchecks') {
+      steps {
+        sh '''
+          # wait for app to respond (max ~30s)
+          i=0
+          until docker run --rm --network ${NETWORK} curlimages/curl:8.2.1 -sS http://delivery_metrics:8000/metrics >/dev/null 2>&1 || [ $i -ge 30 ]; do
+            sleep 1; i=$((i+1))
+          done
+          if [ $i -ge 30 ]; then
+            echo "delivery_metrics did not start in time"; docker logs delivery_metrics || true; exit 1
+          fi
+
+          # wait for prometheus to be ready
+          i=0
+          until curl -sS http://localhost:9090/-/ready >/dev/null 2>&1 || [ $i -ge 30 ]; do
+            sleep 1; i=$((i+1))
+          done
+          if [ $i -ge 30 ]; then
+            echo "Prometheus did not become ready in time"; docker logs prometheus || true; exit 1
+          fi
+
+          echo "All services started successfully."
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" || true'
+      echo "Prometheus: http://<jenkins-node-host>:9090   Grafana: http://<jenkins-node-host>:3000  (if ports exposed)"
+    }
+    failure {
+      sh 'docker ps -a || true; docker logs prometheus || true; docker logs delivery_metrics || true; docker logs grafana || true'
+    }
+  }
+}
