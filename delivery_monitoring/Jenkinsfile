@@ -1,7 +1,6 @@
 pipeline {
   agent any
   environment {
-    LOCAL_SOURCE = "/mnt/c/Users/Disha Acharya/OneDrive/Desktop/New folder/delivery_monitoring"
     NETWORK = "monitoring_net"
     APP_IMAGE = "delivery_metrics:jenkins"
   }
@@ -10,9 +9,8 @@ pipeline {
       steps {
         sh """
           set -e
-          echo "Copying files from LOCAL_SOURCE=${LOCAL_SOURCE} to workspace..."
-          mkdir -p "\$WORKSPACE"
-          cp -r "${LOCAL_SOURCE}/." "\$WORKSPACE/" || true
+          echo "Using workspace: \$WORKSPACE"
+          # show files so we can debug easily
           ls -la "\$WORKSPACE"
         """
       }
