@@ -63,10 +63,12 @@ pipeline {
 
           docker run -d --name delivery_metrics --network ${NETWORK} -p 8000:8000 ${APP_IMAGE}
 
-          docker run -d --name prometheus --network ${NETWORK} -p 9090:9090 \
-            -v "$BUILD_CTX/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-            -v "$BUILD_CTX/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro" \
-            prom/prometheus
+           # Mount the whole build context directory to /etc/prometheus inside the container.
++          # This avoids host-vs-container path resolution issues and ensures Prometheus can read
++          # prometheus.yml and rule files from the same directory.
++          docker run -d --name prometheus --network ${NETWORK} -p 9090:9090 \
++            -v "$BUILD_CTX:/etc/prometheus:ro" \
++            prom/prometheus
 
           docker run -d --name grafana --network ${NETWORK} -p 3000:3000 grafana/grafana
         '''
