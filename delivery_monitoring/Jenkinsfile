@@ -53,27 +53,33 @@ pipeline {
     }
 
     stage('Start Services') {
-      steps {
-        sh '''
-          set -e
-          BUILD_CTX="$WORKSPACE/$BUILD_SUBDIR"
+  steps {
+    sh '''
+      set -e
+      BUILD_CTX="$WORKSPACE/$BUILD_SUBDIR"
 
-          docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}
-          for c in prometheus grafana delivery_metrics; do docker rm -f $c >/dev/null 2>&1 || true; done
+      # ensure network exists
+      docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}
 
-          docker run -d --name delivery_metrics --network ${NETWORK} -p 8000:8000 ${APP_IMAGE}
+      # cleanup previous runs
+      for c in prometheus grafana delivery_metrics; do
+        docker rm -f $c >/dev/null 2>&1 || true
+      done
 
-           # Mount the whole build context directory to /etc/prometheus inside the container.
-+          # This avoids host-vs-container path resolution issues and ensures Prometheus can read
-+          # prometheus.yml and rule files from the same directory.
-+          docker run -d --name prometheus --network ${NETWORK} -p 9090:9090 \
-+            -v "$BUILD_CTX:/etc/prometheus:ro" \
-+            prom/prometheus
+      # run the app container (publish 8000 so host curl works)
+      docker run -d --name delivery_metrics --network ${NETWORK} -p 8000:8000 ${APP_IMAGE}
 
-          docker run -d --name grafana --network ${NETWORK} -p 3000:3000 grafana/grafana
-        '''
-      }
-    }
+      # run prometheus: mount the whole build context into /etc/prometheus
+      docker run -d --name prometheus --network ${NETWORK} -p 9090:9090 \
+        -v "$BUILD_CTX:/etc/prometheus:ro" \
+        prom/prometheus
+
+      # run grafana
+      docker run -d --name grafana --network ${NETWORK} -p 3000:3000 grafana/grafana
+    '''
+  }
+}
+
 
     stage('Healthchecks') {
       steps {
