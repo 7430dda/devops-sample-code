@@ -3,16 +3,29 @@ pipeline {
   environment {
     NETWORK = "monitoring_net"
     APP_IMAGE = "delivery_metrics:jenkins"
+    BUILD_SUBDIR = "delivery_monitoring"
   }
   stages {
     stage('Prepare') {
       steps {
-        sh """
+        sh '''
           set -e
-          echo "Using workspace: \$WORKSPACE"
-          # show files so we can debug easily
-          ls -la "\$WORKSPACE"
-        """
+          echo "Workspace: $WORKSPACE"
+          echo "Show repo root:"
+          ls -la "$WORKSPACE" || true
+          BUILD_CTX="$WORKSPACE/$BUILD_SUBDIR"
+          echo "Build context: $BUILD_CTX"
+          if [ ! -d "$BUILD_CTX" ]; then
+            echo "ERROR: build context directory does not exist: $BUILD_CTX"
+            exit 2
+          fi
+          echo "Files in build context:"
+          ls -la "$BUILD_CTX" || true
+          echo "Dockerfile check:"
+          [ -f "$BUILD_CTX/Dockerfile" ] && echo "Dockerfile present" || (echo "Dockerfile MISSING in $BUILD_CTX"; exit 3)
+          [ -f "$BUILD_CTX/app.py" ] && echo "app.py present" || echo "Warning: app.py missing (check file name)"
+          [ -f "$BUILD_CTX/requirements.txt" ] && echo "requirements.txt present" || echo "Warning: requirements.txt missing"
+        '''
       }
     }
 
@@ -28,9 +41,13 @@ pipeline {
     stage('Build Image') {
       steps {
         sh '''
-          cd "$WORKSPACE"
-          # Build app image
-          docker build -t ${APP_IMAGE} .
+          set -e
+          BUILD_CTX="$WORKSPACE/$BUILD_SUBDIR"
+          mkdir -p "$WORKSPACE/build_logs"
+          echo "Building Docker image from context: $BUILD_CTX"
+          # don't use --progress (some docker clients in container don't support it)
+          docker build -t ${APP_IMAGE} "$BUILD_CTX" 2>&1 | tee "$WORKSPACE/build_logs/docker_build_output.log" || (echo "Docker build failed; last 200 lines:"; tail -n 200 "$WORKSPACE/build_logs/docker_build_output.log"; exit 1)
+          echo "Docker build succeeded"
         '''
       }
     }
@@ -38,22 +55,19 @@ pipeline {
     stage('Start Services') {
       steps {
         sh '''
-          # create network if missing
-          docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}
+          set -e
+          BUILD_CTX="$WORKSPACE/$BUILD_SUBDIR"
 
-          # cleanup previous runs
+          docker network inspect ${NETWORK} >/dev/null 2>&1 || docker network create ${NETWORK}
           for c in prometheus grafana delivery_metrics; do docker rm -f $c >/dev/null 2>&1 || true; done
 
-          # run app container (publish 8000 so host curl works)
           docker run -d --name delivery_metrics --network ${NETWORK} -p 8000:8000 ${APP_IMAGE}
 
-          # run prometheus using prom config from workspace
           docker run -d --name prometheus --network ${NETWORK} -p 9090:9090 \
-            -v "$WORKSPACE/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-            -v "$WORKSPACE/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro" \
+            -v "$BUILD_CTX/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$BUILD_CTX/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro" \
             prom/prometheus
 
-          # run grafana
           docker run -d --name grafana --network ${NETWORK} -p 3000:3000 grafana/grafana
         '''
       }
@@ -62,7 +76,9 @@ pipeline {
     stage('Healthchecks') {
       steps {
         sh '''
-          # wait for app to respond (max ~30s)
+          set -e
+          BUILD_CTX="$WORKSPACE/$BUILD_SUBDIR"
+
           i=0
           until docker run --rm --network ${NETWORK} curlimages/curl:8.2.1 -sS http://delivery_metrics:8000/metrics >/dev/null 2>&1 || [ $i -ge 30 ]; do
             sleep 1; i=$((i+1))
@@ -71,7 +87,6 @@ pipeline {
             echo "delivery_metrics did not start in time"; docker logs delivery_metrics || true; exit 1
           fi
 
-          # wait for prometheus to be ready
           i=0
           until curl -sS http://localhost:9090/-/ready >/dev/null 2>&1 || [ $i -ge 30 ]; do
             sleep 1; i=$((i+1))
@@ -88,7 +103,8 @@ pipeline {
 
   post {
     always {
-      sh 'docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" || true'
+      sh 'echo "Containers:"; docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" || true'
+      sh 'echo "Build log tail:"; tail -n 50 "$WORKSPACE/build_logs/docker_build_output.log" || true'
       echo "Prometheus: http://<jenkins-node-host>:9090   Grafana: http://<jenkins-node-host>:3000  (if ports exposed)"
     }
     failure {
